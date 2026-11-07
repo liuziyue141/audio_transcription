@@ -108,7 +108,9 @@ def main():
 
     # 100 utterances for overfitting, short-ish ones so it is fast
     pool = sorted([r for r in kept if 4.0 <= float(r["duration"]) <= 12.0], key=lambda r: r["ID"])
-    over = rng.sample(pool, 100)
+    if len(pool) < 100:  # tiny / synthetic corpora
+        pool = sorted(kept, key=lambda r: r["ID"])
+    over = rng.sample(pool, min(100, len(pool)))
     write_csv(os.path.join(data_dir, "train_gt_overfit100.csv"), over, fields)
     stats["train_gt_overfit100"] = {"utts": len(over), "hours": round(hours(over), 3)}
 

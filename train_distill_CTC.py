@@ -544,7 +544,9 @@ if __name__ == "__main__":
     asr_brain._exported = False
     asr_brain.fixed_ids = set(sorted(read_csv_column(hparams["valid_csv"], "ID"))[:5])
     n_batches = len(train_bs) if train_bs is not None else len(train_data) // hparams["batch_size"]
-    asr_brain.steps_per_epoch = max(1, n_batches // hparams["grad_accumulation_factor"])
+    # grad_accumulation_factor is a SpeechBrain run option: a CLI value overrides
+    # the YAML one inside Brain, so read the Brain's effective value.
+    asr_brain.steps_per_epoch = max(1, n_batches // asr_brain.grad_accumulation_factor)
 
     if hparams["test_decoder"] == "beam":
         from speechbrain.decoders.ctc import CTCBeamSearcher

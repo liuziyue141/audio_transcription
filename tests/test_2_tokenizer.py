@@ -17,7 +17,7 @@ def test_tokenizer_round_trip(work_dir):
 
     with open(os.path.join(work_dir, "data", "train_gt.csv"), newline="") as f:
         rows = list(csv.DictReader(f))
-    sample = random.Random(0).sample(rows, 100)
+    sample = random.Random(0).sample(rows, min(100, len(rows)))
     texts = [normalize(r["wrd"]) for r in sample]
 
     pl = os.path.join(work_dir, "data", "train_pl.csv")
