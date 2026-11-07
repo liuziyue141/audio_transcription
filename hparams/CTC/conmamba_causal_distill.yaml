@@ -1,0 +1,308 @@
+# ############################################################################
+# Baseline: Whisper teacher -> causal (streaming) ConMamba CTC student
+# Copied from hparams/CTC/conmamba_large.yaml. Changes are marked  # CHANGED
+# or  # NEW. Experiments E0-E3 differ only in --train_csv and --kd_weight.
+# Train with: python train_distill_CTC.py hparams/CTC/conmamba_causal_distill.yaml
+#   --work_dir /data/work --data_folder /data/LibriSpeech --experiment E0_...
+# ############################################################################
+
+seed: 3402
+__set_seed: !apply:torch.manual_seed [!ref <seed>]
+project: Mamba-ASR
+experiment: E0                                       # CHANGED: set per run
+work_dir: !PLACEHOLDER                               # NEW: EBS volume, e.g. /data/work
+output_folder: !ref <work_dir>/runs/<experiment>     # CHANGED: on EBS
+save_folder: !ref <output_folder>/save
+train_log: !ref <output_folder>/train_log.txt
+step_log: !ref <output_folder>/step_log.jsonl        # NEW: every-50-step metrics
+s3_uri: null                                         # NEW: e.g. s3://bucket/mamba-runs/<experiment>
+
+# Data files (prepared once by prepare_distill_data.py)       # CHANGED
+data_folder: !PLACEHOLDER
+data_csv_folder: !ref <work_dir>/data
+tokenizer_folder: !ref <work_dir>/tokenizer          # NEW: shared across ALL runs
+tokenizer_train_csv: !ref <data_csv_folder>/train_gt.csv
+train_csv: !ref <data_csv_folder>/train_gt.csv       # E1/E3: <data_csv_folder>/train_pl.csv
+valid_csv: !ref <data_csv_folder>/dev-clean.csv
+test_csv:
+    - !ref <data_csv_folder>/dev-clean.csv
+    - !ref <data_csv_folder>/dev-other.csv
+    - !ref <data_csv_folder>/test-clean.csv
+    - !ref <data_csv_folder>/test-other.csv
+allow_train_as_valid: False   # NEW: only True for the overfitting smoke tests
+
+skip_train: False
+precision: bf16
+eval_modes: [average, best]   # NEW: report averaged model and best checkpoint
+test_decoder: greedy          # NEW: greedy (reported) | beam (separate column)
+
+# Teacher features (Teacher pass 2)                            # NEW
+teacher_dir: !ref <work_dir>/teacher
+teacher_feats: !ref <teacher_dir>/teacher_feats.f16
+teacher_index: !ref <teacher_dir>/teacher_feats.index.json
+teacher_stats: !ref <teacher_dir>/teacher_stats.npz
+teacher_dim: 768
+kd_weight: 0.0                # 1.0 for E2/E3, 0.0 for E0/E1
+max_frame_diff: 2
+
+####################### Training Parameters ####################################
+
+number_of_epochs: 60          # CHANGED (500)
+batch_size: 32
+grad_accumulation_factor: 2   # CHANGED (4) -> ~600 s audio per update
+max_grad_norm: 5.0
+sorting: random
+num_workers: 4                # CHANGED (16): g5.xlarge has 4 vCPUs
+loss_reduction: batchmean
+valid_search_interval: 1
+avg_checkpoints: 10
+log_every_steps: 50           # NEW
+throughput_check_step: 200    # NEW
+max_projected_hours: 12.0     # NEW: stop if a run is projected above this
+constant_lr: False            # NEW: True only for overfitting smoke tests
+kill_at_step: null            # NEW: sanity check 9 (simulated spot interruption)
+use_fea_augment: True         # NEW: False for overfitting smoke tests
+
+lr_model: 0.001
+weight_decay: 0.0005
+
+# Feature parameters
+sample_rate: 16000
+n_fft: 512
+n_mels: 80
+win_length: 25
+
+dynamic_batching: True
+max_batch_length_train: 300   # CHANGED (850)
+max_batch_len_val: 100
+num_bucket: 200
+shuffle: False
+max_batch_ex: 128
+batch_ordering: random
+
+dynamic_batch_sampler_train:
+    max_batch_length: !ref <max_batch_length_train>
+    num_buckets: !ref <num_bucket>
+    shuffle: !ref <shuffle>
+    batch_ordering: !ref <batch_ordering>
+    max_batch_ex: !ref <max_batch_ex>
+
+dynamic_batch_sampler_val:
+    max_batch_length: !ref <max_batch_len_val>
+    num_buckets: !ref <num_bucket>
+    shuffle: !ref <shuffle>
+    batch_ordering: !ref <batch_ordering>
+    max_batch_ex: !ref <max_batch_ex>
+
+train_dataloader_opts:
+    batch_size: !ref <batch_size>
+    shuffle: True
+    num_workers: !ref <num_workers>
+
+valid_dataloader_opts:
+    batch_size: 1
+
+test_dataloader_opts:
+    batch_size: 1
+
+####################### Model Parameters #######################################
+
+attention_type: RelPosMHAXL # unused
+nhead: 4 # unused
+
+d_model: 256
+d_ffn: 1024
+num_encoder_layers: 18
+num_decoder_layers: 0
+transformer_dropout: 0.1
+cnn_dropout: 0.1              # NEW name for the CNN front end's (previously implicit) default
+activation: !name:torch.nn.GELU
+output_neurons: 31
+
+token_type: char
+character_coverage: 1.0
+blank_index: 0
+bos_index: 1
+eos_index: 2
+
+beam_size: 100
+beam_prune_logp: -12.0
+token_prune_min_logp: -1.2
+prune_history: False
+
+d_state: 16
+expand: 2
+d_conv: 4
+bidirectional: False          # CHANGED (True)
+mamba_config:
+    d_state: !ref <d_state>
+    expand: !ref <expand>
+    d_conv: !ref <d_conv>
+    bidirectional: !ref <bidirectional>
+
+############################## models ################################
+
+# padding: causal  -- in SpeechBrain 1.0.0 this pads only the FREQUENCY axis;
+# the TIME axis gets no padding ("valid"), so student frame i depends on mel
+# frames 4i..4i+6 only. That is streamable and is verified by sanity check 4.
+CNN: !new:speechbrain.lobes.models.convolution.ConvolutionFrontEnd
+    input_shape: (8, 10, 80)
+    num_blocks: 2
+    num_layers_per_block: 1
+    out_channels: (64, 32)
+    kernel_sizes: (3, 3)
+    strides: (2, 2)
+    residuals: (False, False)
+    dropout: !ref <cnn_dropout>
+    padding: causal           # CHANGED (same)
+
+Transformer: !new:modules.TransformerASR.TransformerASR
+    input_size: 640
+    tgt_vocab: !ref <output_neurons>
+    d_model: !ref <d_model>
+    nhead: !ref <nhead>
+    num_encoder_layers: !ref <num_encoder_layers>
+    num_decoder_layers: !ref <num_decoder_layers>
+    d_ffn: !ref <d_ffn>
+    dropout: !ref <transformer_dropout>
+    activation: !ref <activation>
+    encoder_module: conmamba
+    attention_type: !ref <attention_type>
+    normalize_before: True
+    causal: True              # CHANGED (False)
+    mamba_config: !ref <mamba_config>
+
+ctc_lin: !new:speechbrain.nnet.linear.Linear
+    input_size: !ref <d_model>
+    n_neurons: !ref <output_neurons>
+
+# NEW: training-only projection to Whisper-small width. In modules (trained)
+# and recoverables (resumable), NOT in `model` (so averaging/export ignore it).
+distill_proj: !new:speechbrain.nnet.linear.Linear
+    input_size: !ref <d_model>
+    n_neurons: !ref <teacher_dim>
+
+normalize: !new:speechbrain.processing.features.InputNormalization
+    norm_type: global         # fixed: never "sentence" (uses future audio)
+    update_until_epoch: 4
+
+modules:
+    CNN: !ref <CNN>
+    Transformer: !ref <Transformer>
+    ctc_lin: !ref <ctc_lin>
+    normalize: !ref <normalize>
+    distill_proj: !ref <distill_proj>
+
+model: !new:torch.nn.ModuleList
+    - [!ref <CNN>, !ref <Transformer>, !ref <ctc_lin>]
+
+####################### Decoding & optimiser ###########################
+
+test_beam_search:
+    blank_index: !ref <blank_index>
+    beam_size: !ref <beam_size>
+    beam_prune_logp: !ref <beam_prune_logp>
+    token_prune_min_logp: !ref <token_prune_min_logp>
+    prune_history: !ref <prune_history>
+
+ctc_cost: !name:speechbrain.nnet.losses.ctc_loss
+    blank_index: !ref <blank_index>
+    reduction: !ref <loss_reduction>
+
+n_warmup_steps: 3000          # CHANGED (7500)
+noam_annealing: !new:speechbrain.nnet.schedulers.NoamScheduler
+    lr_initial: !ref <lr_model>
+    n_warmup_steps: !ref <n_warmup_steps>
+
+model_opt_class: !name:torch.optim.AdamW
+    lr: !ref <lr_model>
+    betas: (0.9, 0.98)
+    eps: 0.000000001
+    weight_decay: !ref <weight_decay>
+
+log_softmax: !new:torch.nn.LogSoftmax
+    dim: -1
+
+############################## Augmentations ###################################
+
+speed_perturb: False          # CHANGED: off (breaks alignment with cached teacher feats)
+
+time_drop_length_low: 6
+time_drop_length_high: 12
+time_drop_count_low: 1
+time_drop_count_high: 5
+time_drop_replace: "mean"
+
+time_drop: !new:speechbrain.augment.freq_domain.SpectrogramDrop
+    drop_length_low: !ref <time_drop_length_low>
+    drop_length_high: !ref <time_drop_length_high>
+    drop_count_low: !ref <time_drop_count_low>
+    drop_count_high: !ref <time_drop_count_high>
+    replace: !ref <time_drop_replace>
+    dim: 1
+
+freq_drop_length_low: 10
+freq_drop_length_high: 20
+freq_drop_count_low: 1
+freq_drop_count_high: 3
+freq_drop_replace: "mean"
+
+freq_drop: !new:speechbrain.augment.freq_domain.SpectrogramDrop
+    drop_length_low: !ref <freq_drop_length_low>
+    drop_length_high: !ref <freq_drop_length_high>
+    drop_count_low: !ref <freq_drop_count_low>
+    drop_count_high: !ref <freq_drop_count_high>
+    replace: !ref <freq_drop_replace>
+    dim: 2
+
+fea_augment: !new:speechbrain.augment.augmenter.Augmenter
+    parallel_augment: False
+    concat_original: False    # fixed
+    repeat_augment: 1         # fixed
+    shuffle_augmentations: False
+    min_augmentations: 2
+    max_augmentations: 2
+    augment_prob: 1.0
+    augmentations: [
+        !ref <time_drop>,
+        !ref <freq_drop>,
+    ]
+
+compute_features: !new:speechbrain.lobes.features.Fbank
+    sample_rate: !ref <sample_rate>
+    n_fft: !ref <n_fft>
+    n_mels: !ref <n_mels>
+    win_length: !ref <win_length>
+
+############################## Logging ##########################
+
+checkpointer: !new:speechbrain.utils.checkpoints.Checkpointer
+    checkpoints_dir: !ref <save_folder>
+    recoverables:
+        model: !ref <model>
+        noam_scheduler: !ref <noam_annealing>
+        normalizer: !ref <normalize>
+        counter: !ref <epoch_counter>
+        distill_proj: !ref <distill_proj>   # NEW
+
+epoch_counter: !new:speechbrain.utils.epoch_loop.EpochCounter
+    limit: !ref <number_of_epochs>
+
+train_logger: !new:speechbrain.utils.train_logger.FileTrainLogger
+    save_file: !ref <train_log>
+
+cer_computer: !name:speechbrain.utils.metric_stats.ErrorRateStats
+    split_tokens: True
+wer_computer: !name:speechbrain.utils.metric_stats.ErrorRateStats
+
+use_wandb: False
+wandb_entity: null            # set to your own W&B entity if use_wandb: True
+resume: False
+wandb_logger: !name:speechbrain.utils.train_logger.WandBLogger
+    initializer: !name:wandb.init
+    entity: !ref <wandb_entity>
+    project: !ref <project>
+    name: !ref <experiment>
+    dir: !ref <save_folder>
+    reinit: true
+    resume: !ref <resume>

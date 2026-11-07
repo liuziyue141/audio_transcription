@@ -1,0 +1,14 @@
+# Teacher env (Python 3.10+). Separate from the training env on purpose.
+# Install PyTorch for your driver first, e.g.:
+#   pip install torch==2.4.1 --index-url https://download.pytorch.org/whl/cu121
+# faster-whisper's CTranslate2 needs CUDA 12 cuBLAS + cuDNN 9 at runtime; the
+# two nvidia-* wheels below provide them (see README_distill.md for LD_LIBRARY_PATH).
+transformers==4.44.2
+faster-whisper==1.0.3
+nvidia-cublas-cu12
+nvidia-cudnn-cu12==9.*
+soundfile
+numpy<2
+num2words
+jiwer
+matplotlib
